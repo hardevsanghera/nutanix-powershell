@@ -1,12 +1,18 @@
-#Create-NTNXVM.ps1
+﻿#Create-NTNXVM.ps1
 #   Copyright 2016 NetVoyage Corporation d/b/a NetDocuments.
+#https://github.com/NetDocuments/nutanix-powershell
+#Apache License 2.0 https://github.com/NetDocuments/nutanix-powershell/blob/master/LICENSE
+#Amended to use network name, container and additional volume(s), clarify messages,
+#fix vmname lookup collisions - search for vms was using wildcards hardev@nutanix.com May19
+
 param(
     [Parameter(mandatory=$true)][String]$VMName,
-    [Parameter(mandatory=$true)][Int]$VMVLANID,
+    [Parameter(mandatory=$true)][String]$vmnetworkname,
     [Parameter(mandatory=$true)][Int64]$VMRAMGB,
     [Parameter(mandatory=$false)][Int]$VMVcpus = 1, #default to 1
     [Parameter(mandatory=$false)][Int]$VMCoresPerVcpu = 1, #default to 1
     [Parameter(mandatory=$false)][String]$VMIP,
+    [Parameter(mandatory=$false)][String]$CONTAINER,
     [Parameter(ParameterSetName='Image')][Switch]$UseImageStore,
     [Parameter(ParameterSetName='Image')][String]$ImageName,
     [Parameter(ParameterSetName='CloneVM')][Switch]$CloneExistingVMDisk,
@@ -15,7 +21,7 @@ param(
     [Parameter(ParameterSetName='BlankVM')][Int]$DiskSizeGB = 20, #default to 20GB if not specified
     [Parameter(ParameterSetName='BlankVM')][Switch]$MountISO,
     [Parameter(ParameterSetName='BlankVM')][String]$ISOName,
-    [Parameter(mandatory=$false)]$AdditionalVolumes, #pass an array of key:values
+    [Parameter(mandatory=$false)]$AdditionalVolumes, #CHANGE: A single number to represent size of additional data disk(s) on the VM
     [Parameter(mandatory=$false)][Switch]$noPowerOn,
     [Parameter(mandatory=$false)][String]$ClusterName,
     [Parameter(mandatory=$false)][String]$Description
@@ -32,17 +38,18 @@ if (!$connection){
     exit 1
 }
 #connection to cluster is all set up, now move on to the fun stuff
-Write-Host "Checking if VM already exists..."
-if (!(Get-NTNXVM -SearchString $VMName).vmid){
+Write-Host "Checking if VM already exists...(No data found) message is good!"
+$n = (Get-NTNXVM | where vmname -eq $VMName).count #expect a single item returned
+if ($n -eq 0){
     #convert GB to MB for RAM
     $ramMB = ($VMRAMGB * 1024)
     #setup the nicSpec
     $nicSpec = New-NTNXObject -Name VMNicSpecDTO
     #find the right network to put the VM on
-    $network = (Get-NTNXNetwork | ?{$_.vlanID -eq $VMVLANID})
+    $network = (Get-NTNXNetwork | ?{$_.name -eq $vmnetworkname})
     if($network){$nicSpec.networkuuid = $network.uuid}
     else{
-        Write-Warning "Specified VLANID: $VMVLANID, does not exist, it needs to be created in Prism, exiting"
+        Write-Warning "Specified Network: $vmnetworkname, does not exist, it needs to be created in Prism, exiting"
         Break
     }
     #request an IP, if specified
@@ -75,7 +82,7 @@ if (!(Get-NTNXVM -SearchString $VMName).vmid){
         #setup the image to clone from the Existing VM
         $diskCloneSpec = New-NTNXObject -Name VMDiskSpecCloneDTO
         #check to make sure specified Existing VM Exists
-        $diskToClone = ((Get-NTNXVMDisk -Vmid (Get-NTNXVM -searchstring $ExistingVMName).vmId) | ? {!$_.isCdrom})
+        $diskToClone = ((Get-NTNXVMDisk -Vmid (Get-NTNXVM | where vmname -eq $ExistingVMName).vmId) | ? {!$_.isCdrom})
         if($diskToClone){$diskCloneSpec.vmDiskUuid = $diskToClone.VmDiskUuid}
         else{
             Write-Warning "Specified Existing VM Name: $ExistingVMName, does not exist, exiting"
@@ -87,7 +94,7 @@ if (!(Get-NTNXVM -SearchString $VMName).vmid){
     elseif($UseBlankDisk){
         #setup the new disk on the default container
         $diskCreateSpec = New-NTNXObject -Name VmDiskSpecCreateDTO
-        $diskCreateSpec.containerUuid = (Get-NTNXContainer -SearchString "default").containerUuid
+        $diskCreateSpec.containerUuid = (Get-NTNXContainer -SearchString $CONTAINER).containerUuid
         $diskCreateSpec.sizeMb = $DiskSizeGB * 1024
         #create the Disk
         $vmDisk.vmDiskCreate = $diskCreateSpec
@@ -131,8 +138,9 @@ if (!(Get-NTNXVM -SearchString $VMName).vmid){
         if(!($vmDisk[1])){$vmDisk = @($vmDisk)}
         foreach($volume in $AdditionalVolumes){
             $diskCreateSpec = New-NTNXObject -Name VmDiskSpecCreateDTO
-            $diskCreateSpec.containerUuid = (Get-NTNXContainer -SearchString "default").containerUuid
-            $diskCreateSpec.sizeMb = $volume.Size * 1024
+            $diskCreateSpec.containerUuid = (Get-NTNXContainer -SearchString $CONTAINER).containerUuid
+             #$diskCreateSpec.sizeMb = $volume.Size * 1024
+            $diskCreateSpec.sizeMb = $volume * 1024 #treat the parameter -AdditionalVolumes NNN as a single number, the size of the addiitonal disk or disks
             $AdditionalvmDisk = New-NTNXObject -Name VMDiskDTO
             $AdditionalvmDisk.vmDiskCreate = $diskCreateSpec
             $vmDisk += $AdditionalvmDisk
@@ -154,7 +162,8 @@ if (!(Get-NTNXVM -SearchString $VMName).vmid){
         while (!$VMidToPowerOn -and $count -le 6){
             Write-Host "Waiting 5 seconds for $VMName to finish creating..."
             Start-Sleep 5
-            $VMidToPowerOn = (Get-NTNXVM -SearchString $VMName).vmid
+            #$VMidToPowerOn = (Get-NTNXVM -SearchString $VMName).vmid
+            $VMidToPowerOn = (Get-NTNXVM | where vmname -eq $VMName).vmid
             $count++
         }
         #now power on the VM
